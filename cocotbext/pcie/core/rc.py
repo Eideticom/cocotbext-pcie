@@ -26,7 +26,10 @@ import logging
 import mmap
 import struct
 
+from random import shuffle
+
 import cocotb
+from cocotb import queue
 from cocotb.queue import Queue
 from cocotb.triggers import Event, Timer, First
 
@@ -66,7 +69,8 @@ class RootComplex(Switch):
         self.rx_cpl_sync = [Event() for k in range(256)]
 
         self.rx_tlp_handler = {}
-
+        self.mem_rd_queue_enable = False
+                
         self.upstream_bridge.upstream_tx_handler = self.downstream_recv
 
         self.tree = TreeItem()
@@ -159,7 +163,7 @@ class RootComplex(Switch):
         if len(region) == 3:
             return region[2][offset:offset+length]
         elif len(region) == 4:
-            return await region[2](offset, length)
+            await region[2](offset, length)
 
     async def write_region(self, addr, data):
         region = self.find_region(addr)
@@ -179,7 +183,7 @@ class RootComplex(Switch):
         if len(region) == 3:
             return region[2][offset:offset+length]
         elif len(region) == 4:
-            return await region[2](offset, length)
+            await region[2](offset, length)
 
     async def write_io_region(self, addr, data):
         region = self.find_io_region(addr)
@@ -210,7 +214,10 @@ class RootComplex(Switch):
             self.rx_cpl_sync[tlp.tag].set()
         elif tlp.fmt_type in self.rx_tlp_handler:
             tlp.release_fc()
-            await self.rx_tlp_handler[tlp.fmt_type](tlp)
+            if self.mem_rd_queue_enable and tlp.fmt_type in [TlpType.MEM_READ, TlpType.MEM_READ_64]:
+                self.mem_rd_queue.put_nowait(tlp)
+            else:
+                await self.rx_tlp_handler[tlp.fmt_type](tlp)
         else:
             tlp.release_fc()
             raise Exception("Unhandled TLP")
@@ -351,7 +358,32 @@ class RootComplex(Switch):
             cpl = Tlp.create_ur_completion_for_tlp(tlp, PcieId(0, 0, 0))
             self.log.debug("UR Completion: %s", repr(cpl))
             await self.send(cpl)
-
+    
+    async def enable_rnd_mem_rd_completions_order(self):
+        # -------------------------------------
+        # MemRD Un-ordered completion generator
+        self.mem_rd_queue_enable = True
+        self.mem_rd_queue = Queue()
+        self.mem_rd_queue_event = Event('mem_rd_queue')
+        cocotb.fork(self.handle_mem_read_tlp_queue())
+    
+    def send_mem_rd_completions(self):
+        self.mem_rd_queue_event.set()
+        
+    async def handle_mem_read_tlp_queue(self):
+        while self.mem_rd_queue_enable:
+            await self.mem_rd_queue_event.wait()
+            tlps = []
+            while not self.mem_rd_queue.empty():
+                tlps.append(self.mem_rd_queue.get_nowait())
+                
+            if tlps:
+                shuffle(tlps)
+                for inx, tlp in enumerate(tlps):
+                    await self.handle_mem_read_tlp(tlp)
+                
+            self.mem_rd_queue_event.clear()
+        
     async def handle_mem_read_tlp(self, tlp):
         if self.find_region(tlp.address):
             self.log.info("Memory read, address 0x%08x, length %d, BE 0x%x/0x%x, tag %d",
@@ -468,7 +500,7 @@ class RootComplex(Switch):
         n = 0
         data = b''
 
-        while True:
+        while n < length:
             tlp = Tlp()
             tlp.fmt_type = TlpType.CFG_READ_1
             tlp.requester_id = PcieId(0, 0, 0)
@@ -497,9 +529,6 @@ class RootComplex(Switch):
 
             n += byte_length
             addr += byte_length
-
-            if n >= length:
-                break
 
         return data[:length]
 
@@ -531,7 +560,7 @@ class RootComplex(Switch):
     async def config_write(self, dev, addr, data, timeout=0, timeout_unit='ns'):
         n = 0
 
-        while True:
+        while n < len(data):
             tlp = Tlp()
             tlp.fmt_type = TlpType.CFG_WRITE_1
             tlp.requester_id = PcieId(0, 0, 0)
@@ -552,9 +581,6 @@ class RootComplex(Switch):
 
             n += byte_length
             addr += byte_length
-
-            if n >= len(data):
-                break
 
     async def config_write_words(self, dev, addr, data, byteorder='little', ws=2, timeout=0, timeout_unit='ns'):
         words = data
@@ -665,7 +691,7 @@ class RootComplex(Switch):
             val = await self.read_io_region(addr, length)
             return val
 
-        while True:
+        while n < length:
             tlp = Tlp()
             tlp.fmt_type = TlpType.IO_READ
             tlp.requester_id = PcieId(0, 0, 0)
@@ -693,9 +719,6 @@ class RootComplex(Switch):
 
             n += byte_length
             addr += byte_length
-
-            if n >= length:
-                break
 
         return data[:length]
 
@@ -731,7 +754,7 @@ class RootComplex(Switch):
             await self.write_io_region(addr, data)
             return
 
-        while True:
+        while n < len(data):
             tlp = Tlp()
             tlp.fmt_type = TlpType.IO_WRITE
             tlp.requester_id = PcieId(0, 0, 0)
@@ -754,9 +777,6 @@ class RootComplex(Switch):
 
             n += byte_length
             addr += byte_length
-
-            if n >= len(data):
-                break
 
     async def io_write_words(self, addr, data, byteorder='little', ws=2, timeout=0, timeout_unit='ns'):
         words = data
@@ -791,7 +811,7 @@ class RootComplex(Switch):
             val = await self.read_region(addr, length)
             return val
 
-        while True:
+        while n < length:
             tlp = Tlp()
             if addr > 0xffffffff:
                 tlp.fmt_type = TlpType.MEM_READ_64
@@ -802,14 +822,9 @@ class RootComplex(Switch):
             tlp.tc = tc
 
             first_pad = addr % 4
-            # remaining length
             byte_length = length-n
-            # limit to max read request size
-            if byte_length > (128 << self.max_read_request_size) - first_pad:
-                # split on 128-byte read completion boundary
-                byte_length = min(byte_length, (128 << self.max_read_request_size) - (addr & 0x1f))
-            # 4k align
-            byte_length = min(byte_length, 0x1000 - (addr & 0xfff))
+            byte_length = min(byte_length, (128 << self.max_read_request_size)-first_pad)  # max read request size
+            byte_length = min(byte_length, 0x1000 - (addr & 0xfff))  # 4k align
             tlp.set_addr_be(addr, byte_length)
 
             tlp.tag = await self.alloc_tag()
@@ -818,7 +833,7 @@ class RootComplex(Switch):
 
             m = 0
 
-            while True:
+            while m < byte_length:
                 cpl = await self.recv_cpl(tlp.tag, timeout, timeout_unit)
 
                 if not cpl:
@@ -829,7 +844,7 @@ class RootComplex(Switch):
                     raise Exception("Unsuccessful completion")
                 else:
                     assert cpl.byte_count+3+(cpl.lower_address & 3) >= cpl.length*4
-                    assert cpl.byte_count == max(byte_length - m, 1)
+                    assert cpl.byte_count == byte_length - m
 
                     d = cpl.get_data()
 
@@ -838,18 +853,12 @@ class RootComplex(Switch):
 
                 m += len(d)-offset
 
-                if m >= byte_length:
-                    break
-
             self.release_tag(tlp.tag)
 
             n += byte_length
             addr += byte_length
 
-            if n >= length:
-                break
-
-        return data[:length]
+        return data
 
     async def mem_read_words(self, addr, count, byteorder='little', ws=2, timeout=0, timeout_unit='ns', attr=TlpAttr(0), tc=TlpTc.TC0):
         data = await self.mem_read(addr, count*ws, timeout, timeout_unit, attr, tc)
@@ -883,7 +892,7 @@ class RootComplex(Switch):
             await self.write_region(addr, data)
             return
 
-        while True:
+        while n < len(data):
             tlp = Tlp()
             if addr > 0xffffffff:
                 tlp.fmt_type = TlpType.MEM_WRITE_64
@@ -903,9 +912,6 @@ class RootComplex(Switch):
 
             n += byte_length
             addr += byte_length
-
-            if n >= len(data):
-                break
 
     async def mem_write_words(self, addr, data, byteorder='little', ws=2, timeout=0, timeout_unit='ns', attr=TlpAttr(0), tc=TlpTc.TC0):
         words = data
