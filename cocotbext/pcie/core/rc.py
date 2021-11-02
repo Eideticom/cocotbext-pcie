@@ -126,7 +126,9 @@ class RootComplex(Switch):
         self.register_rx_tlp_handler(TlpType.MEM_READ_64, self.handle_mem_read_tlp)
         self.register_rx_tlp_handler(TlpType.MEM_WRITE, self.handle_mem_write_tlp)
         self.register_rx_tlp_handler(TlpType.MEM_WRITE_64, self.handle_mem_write_tlp)
-
+        
+        self.error_injection = None
+    
     def alloc_region(self, size, read=None, write=None):
         addr = 0
         mem = None
@@ -373,6 +375,9 @@ class RootComplex(Switch):
         self.rnd_handle_mem_read_tlp_event.set()
         
     async def handle_mem_read_tlp(self, tlp):
+        if self.error_injection is not None and self.error_injection=='MemRD-poison':
+            tlp.ep = True
+        
         if self.rnd_handle_mem_read_tlp_enable:
             self.rnd_handle_mem_read_tlp.put_nowait(tlp)
         else:
