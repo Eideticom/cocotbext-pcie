@@ -364,6 +364,7 @@ class RootComplex(Switch):
     async def enable_rnd_mem_rd_completions_order(self):
         # -------------------------------------
         # MemRD Un-ordered completion generator
+        self.log.info("Out-of-order MemRD completion TLP tx enabled")
         self.mem_rd_queue_enable = True
         self.mem_rd_queue = Queue()
         self.mem_rd_queue_event = Event('mem_rd_queue')
@@ -375,12 +376,14 @@ class RootComplex(Switch):
     async def handle_mem_read_tlp_queue(self):
         while self.mem_rd_queue_enable:
             await self.mem_rd_queue_event.wait()
+            self.log.info(f"Start MemRD completion responses...")
             tlps = []
             while not self.mem_rd_queue.empty():
                 tlps.append(self.mem_rd_queue.get_nowait())
                 
             if tlps:
                 shuffle(tlps)
+                self.log.info(f"Out-of-order MemRD: sending {len(tlps)} MemRD completions")
                 for inx, tlp in enumerate(tlps):
                     await self.handle_mem_read_tlp(tlp)
                 
