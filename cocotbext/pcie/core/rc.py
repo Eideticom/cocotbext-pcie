@@ -69,19 +69,7 @@ class RootComplex(Switch):
         self.rx_cpl_sync = [Event() for k in range(256)]
 
         self.rx_tlp_handler = {}
-        # -------------------------------------
-        # MemRD Un-ordered completion generator
-        # ToDo: currently user has to set send-completions, automate by adding TimeOut() or queue.size() > M
-        if 'rnd_handle_mem_read_tlp_enable' in kwargs:
-            self.rnd_handle_mem_read_tlp_enable = kwargs['rnd_handle_mem_read_tlp_enable']
-        else:
-            self.rnd_handle_mem_read_tlp_enable = False
-        
-        if self.rnd_handle_mem_read_tlp_enable == True:
-            self.rnd_handle_mem_read_tlp = Queue()
-            self.rnd_handle_mem_read_tlp_event = Event('rnd_handle_mem_read_tlp')
-            cocotb.fork(self.handle_mem_read_tlp_queue())
-        # -------------------------------------
+        self.mem_rd_queue_enable = False
 
         self.upstream_bridge.upstream_tx_handler = self.downstream_recv
 
@@ -119,7 +107,7 @@ class RootComplex(Switch):
         self.msi_msg_limit = 0
         self.msi_events = {}
         self.msi_callbacks = {}
-        
+
         self.register_rx_tlp_handler(TlpType.IO_READ, self.handle_io_read_tlp)
         self.register_rx_tlp_handler(TlpType.IO_WRITE, self.handle_io_write_tlp)
         self.register_rx_tlp_handler(TlpType.MEM_READ, self.handle_mem_read_tlp)
@@ -228,7 +216,10 @@ class RootComplex(Switch):
             self.rx_cpl_sync[tlp.tag].set()
         elif tlp.fmt_type in self.rx_tlp_handler:
             tlp.release_fc()
-            await self.rx_tlp_handler[tlp.fmt_type](tlp)
+            if self.mem_rd_queue_enable and tlp.fmt_type in [TlpType.MEM_READ, TlpType.MEM_READ_64]:
+                self.mem_rd_queue.put_nowait(tlp)
+            else:
+                await self.rx_tlp_handler[tlp.fmt_type](tlp)
         else:
             tlp.release_fc()
             raise Exception("Unhandled TLP")
@@ -369,35 +360,33 @@ class RootComplex(Switch):
             cpl = Tlp.create_ur_completion_for_tlp(tlp, PcieId(0, 0, 0))
             self.log.debug("UR Completion: %s", repr(cpl))
             await self.send(cpl)
-        
-    # -------------------------------------------------
+            
+    async def enable_rnd_mem_rd_completions_order(self):
+        # -------------------------------------
+        # MemRD Un-ordered completion generator
+        self.mem_rd_queue_enable = True
+        self.mem_rd_queue = Queue()
+        self.mem_rd_queue_event = Event('mem_rd_queue')
+        cocotb.fork(self.handle_mem_read_tlp_queue())
+    
     def send_mem_rd_completions(self):
-        self.rnd_handle_mem_read_tlp_event.set()
-        
-    async def handle_mem_read_tlp(self, tlp):
-        if self.error_injection is not None and self.error_injection=='MemRD-poison':
-            tlp.ep = True
-        
-        if self.rnd_handle_mem_read_tlp_enable:
-            self.rnd_handle_mem_read_tlp.put_nowait(tlp)
-        else:
-            self._handle_mem_read_tlp(tlp)
+        self.mem_rd_queue_event.set()
         
     async def handle_mem_read_tlp_queue(self):
-        while self.rnd_handle_mem_read_tlp_enable:
-            await self.rnd_handle_mem_read_tlp_event.wait()
+        while self.mem_rd_queue_enable:
+            await self.mem_rd_queue_event.wait()
             tlps = []
-            while not self.rnd_handle_mem_read_tlp.empty():
-                tlps.append(self.rnd_handle_mem_read_tlp.get_nowait())
+            while not self.mem_rd_queue.empty():
+                tlps.append(self.mem_rd_queue.get_nowait())
                 
             if tlps:
                 shuffle(tlps)
                 for inx, tlp in enumerate(tlps):
-                    await self._handle_mem_read_tlp(tlp)
+                    await self.handle_mem_read_tlp(tlp)
                 
-            self.rnd_handle_mem_read_tlp_event.clear()
-    # -------------------------------------------------
-    async def _handle_mem_read_tlp(self, tlp):
+            self.mem_rd_queue_event.clear()
+        
+    async def handle_mem_read_tlp(self, tlp):
         if self.find_region(tlp.address):
             self.log.info("Memory read, address 0x%08x, length %d, BE 0x%x/0x%x, tag %d",
                 tlp.address, tlp.length, tlp.first_be, tlp.last_be, tlp.tag)
