@@ -25,7 +25,7 @@ THE SOFTWARE.
 import logging
 import mmap
 import struct
-
+from enum import Enum
 from random import shuffle
 
 import cocotb
@@ -42,6 +42,12 @@ from .utils import PcieId, TreeItem, align
 
 
 class RootComplex(Switch):
+    class MEM_RD_QUEUE_STATE(Enum):
+        DISABLED = 0
+        EMPTY = 1
+        ON_HOLD = 2
+        SENDING = 3
+        
     def __init__(self, *args, **kwargs):
         self.default_upstream_bridge = HostBridge
         self.default_downstream_bridge = RootPort
@@ -70,6 +76,7 @@ class RootComplex(Switch):
 
         self.rx_tlp_handler = {}
         self.mem_rd_queue_enable = False
+        self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.DISABLED
 
         self.upstream_bridge.upstream_tx_handler = self.downstream_recv
 
@@ -217,7 +224,17 @@ class RootComplex(Switch):
         elif tlp.fmt_type in self.rx_tlp_handler:
             tlp.release_fc()
             if self.mem_rd_queue_enable and tlp.fmt_type in [TlpType.MEM_READ, TlpType.MEM_READ_64]:
+                if self.mem_rd_queue_fsm in [self.MEM_RD_QUEUE_STATE.DISABLED, self.MEM_RD_QUEUE_STATE.EMPTY]:
+                    self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.ON_HOLD
                 self.mem_rd_queue.put_nowait(tlp)
+                if self.mem_rd_max_cnt is not None and self.mem_rd_queue.qsize() >= self.mem_rd_max_cnt:
+                    self.send_mem_rd_completions()
+                if self.mem_rd_timeout is not None:
+                    if self.mem_rd_timestamp is None:
+                        self.mem_rd_timestamp = cocotb.utils.get_sim_time(self.mem_rd_timeout_units)
+                    elif (self.mem_rd_timeout + self.mem_rd_timestamp) >= cocotb.utils.get_sim_time(self.mem_rd_timeout_units):
+                        self.send_mem_rd_completions()
+                        
             else:
                 await self.rx_tlp_handler[tlp.fmt_type](tlp)
         else:
@@ -361,17 +378,25 @@ class RootComplex(Switch):
             self.log.debug("UR Completion: %s", repr(cpl))
             await self.send(cpl)
             
-    async def enable_rnd_mem_rd_completions_order(self):
+    async def enable_rnd_mem_rd_completions_order(self, timeout=None, timeout_units='us', max_cnt=None):
         # -------------------------------------
         # MemRD Un-ordered completion generator
         self.log.info("Out-of-order MemRD completion TLP tx enabled")
         self.mem_rd_queue_enable = True
+        self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.EMPTY
+        
+        self.mem_rd_timeout_units = timeout_units
+        self.mem_rd_timeout = timeout
+        self.mem_rd_timestamp = None
+        self.mem_rd_max_cnt = max_cnt
+        
         self.mem_rd_queue = Queue()
         self.mem_rd_queue_event = Event('mem_rd_queue')
         cocotb.fork(self.handle_mem_read_tlp_queue())
     
     def send_mem_rd_completions(self):
         self.mem_rd_queue_event.set()
+        self.mem_rd_timestamp = None
         
     async def handle_mem_read_tlp_queue(self):
         while self.mem_rd_queue_enable:
@@ -384,8 +409,10 @@ class RootComplex(Switch):
             if tlps:
                 shuffle(tlps)
                 self.log.info(f"Out-of-order MemRD: sending {len(tlps)} MemRD completions")
+                self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.SENDING
                 for inx, tlp in enumerate(tlps):
                     await self.handle_mem_read_tlp(tlp)
+                self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.EMPTY
                 
             self.mem_rd_queue_event.clear()
         
