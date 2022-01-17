@@ -225,8 +225,8 @@ class TB:
         self.dev.functions[0].configure_bar(1, len(self.regions[1]), True, True)
         self.dev.functions[0].configure_bar(3, len(self.regions[3]), False, False, True)
 
-        cocotb.fork(self._run_rx_tlp())
-        cocotb.fork(self._run_cfg())
+        cocotb.start_soon(self._run_rx_tlp())
+        cocotb.start_soon(self._run_cfg())
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -638,46 +638,43 @@ async def run_test_mem(dut, idle_inserter=None, backpressure_inserter=None):
 
     await tb.rc.enumerate(enable_bus_mastering=True, configure_msi=True)
 
-    dev_bar0 = tb.rc.tree[0][0].bar_addr[0]
-    dev_bar1 = tb.rc.tree[0][0].bar_addr[1]
-    dev_bar3 = tb.rc.tree[0][0].bar_addr[3]
+    dev_bar0 = tb.rc.tree[0][0].bar_window[0]
+    dev_bar1 = tb.rc.tree[0][0].bar_window[1]
+    dev_bar3 = tb.rc.tree[0][0].bar_window[3]
 
     for length in list(range(0, 8)):
         for offset in list(range(8)):
             tb.log.info("IO operation length: %d offset: %d", length, offset)
-            addr = dev_bar3+offset
             test_data = bytearray([x % 256 for x in range(length)])
 
-            await tb.rc.io_write(addr, test_data, 5000)
+            await dev_bar3.write(offset, test_data, timeout=5000)
             assert tb.regions[3][offset:offset+length] == test_data
 
-            assert await tb.rc.io_read(addr, length, 5000) == test_data
+            assert await dev_bar3.read(offset, length, timeout=5000) == test_data
 
     for length in list(range(0, 32))+[1024]:
         for offset in list(range(8))+list(range(4096-8, 4096)):
             tb.log.info("Memory operation (32-bit BAR) length: %d offset: %d", length, offset)
-            addr = dev_bar0+offset
             test_data = bytearray([x % 256 for x in range(length)])
 
-            await tb.rc.mem_write(addr, test_data, 100)
+            await dev_bar0.write(offset, test_data, timeout=100)
             # wait for write to complete
-            await tb.rc.mem_read(addr, 1, 5000)
+            await dev_bar0.read(offset, 1, timeout=5000)
             assert tb.regions[0][offset:offset+length] == test_data
 
-            assert await tb.rc.mem_read(addr, length, 5000) == test_data
+            assert await dev_bar0.read(offset, length, timeout=5000) == test_data
 
     for length in list(range(0, 32))+[1024]:
         for offset in list(range(8))+list(range(4096-8, 4096)):
             tb.log.info("Memory operation (64-bit BAR) length: %d offset: %d", length, offset)
-            addr = dev_bar1+offset
             test_data = bytearray([x % 256 for x in range(length)])
 
-            await tb.rc.mem_write(addr, test_data, 100)
+            await dev_bar1.write(offset, test_data, timeout=100)
             # wait for write to complete
-            await tb.rc.mem_read(addr, 1, 5000)
+            await dev_bar1.read(offset, 1, timeout=5000)
             assert tb.regions[1][offset:offset+length] == test_data
 
-            assert await tb.rc.mem_read(addr, length, 5000) == test_data
+            assert await dev_bar1.read(offset, length, timeout=5000) == test_data
 
     await RisingEdge(dut.coreclkout_hip)
     await RisingEdge(dut.coreclkout_hip)
@@ -687,8 +684,11 @@ async def run_test_dma(dut, idle_inserter=None, backpressure_inserter=None):
 
     tb = TB(dut)
 
-    mem_base, mem_data = tb.rc.alloc_region(1024*1024)
-    io_base, io_data = tb.rc.alloc_io_region(1024)
+    mem = tb.rc.mem_pool.alloc_region(16*1024*1024)
+    mem_base = mem.get_absolute_address(0)
+
+    io = tb.rc.io_pool.alloc_region(1024)
+    io_base = io.get_absolute_address(0)
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
@@ -707,7 +707,7 @@ async def run_test_dma(dut, idle_inserter=None, backpressure_inserter=None):
             await tb.dma_mem_write(addr, test_data, 5000, 'ns')
             # wait for write to complete
             await tb.dma_mem_read(addr, 1, 5000, 'ns')
-            assert mem_data[offset:offset+length] == test_data
+            assert mem[offset:offset+length] == test_data
 
             assert await tb.dma_mem_read(addr, length, 5000, 'ns') == test_data
 
@@ -718,7 +718,7 @@ async def run_test_dma(dut, idle_inserter=None, backpressure_inserter=None):
             test_data = bytearray([x % 256 for x in range(length)])
 
             await tb.dma_io_write(addr, test_data, 5000, 'ns')
-            assert io_data[offset:offset+length] == test_data
+            assert io[offset:offset+length] == test_data
 
             assert await tb.dma_io_read(addr, length, 5000, 'ns') == test_data
 
@@ -744,15 +744,15 @@ async def run_test_msi(dut, idle_inserter=None, backpressure_inserter=None):
         tb.log.info("Send MSI %d", k)
 
         await RisingEdge(dut.coreclkout_hip)
-        dut.app_msi_req <= 1
-        dut.app_msi_tc <= 0
-        dut.app_msi_num <= k
-        dut.app_msi_func_num <= 0
+        dut.app_msi_req.value = 1
+        dut.app_msi_tc.value = 0
+        dut.app_msi_num.value = k
+        dut.app_msi_func_num.value = 0
 
         while not dut.app_msi_ack.value.integer:
             await RisingEdge(dut.coreclkout_hip)
 
-        dut.app_msi_req <= 0
+        dut.app_msi_req.value = 0
         await RisingEdge(dut.coreclkout_hip)
 
         event = tb.rc.msi_get_event(tb.dev.functions[0].pcie_id, k)

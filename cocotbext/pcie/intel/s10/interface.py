@@ -282,15 +282,17 @@ class S10PcieBase:
         self._pause_generator = generator
 
         if self._pause_generator is not None:
-            self._pause_cr = cocotb.fork(self._run_pause())
+            self._pause_cr = cocotb.start_soon(self._run_pause())
 
     def clear_pause_generator(self):
         self.set_pause_generator(None)
 
     async def _run_pause(self):
+        clock_edge_event = RisingEdge(self.clock)
+
         for val in self._pause_generator:
             self.pause = val
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
 
 class S10PcieSource(S10PcieBase):
@@ -335,8 +337,8 @@ class S10PcieSource(S10PcieBase):
         if hasattr(self.bus, "parity"):
             self.bus.parity.setimmediatevalue(0)
 
-        cocotb.fork(self._run_source())
-        cocotb.fork(self._run())
+        cocotb.start_soon(self._run_source())
+        cocotb.start_soon(self._run())
 
     async def _drive(self, obj):
         if self.drive_obj is not None:
@@ -382,8 +384,10 @@ class S10PcieSource(S10PcieBase):
         self.active = False
         ready_delay = []
 
+        clock_edge_event = RisingEdge(self.clock)
+
         while True:
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
             # read handshake signals
             ready_sample = self.bus.ready.value
@@ -391,7 +395,7 @@ class S10PcieSource(S10PcieBase):
 
             if self.reset is not None and self.reset.value:
                 self.active = False
-                self.bus.valid <= 0
+                self.bus.valid.value = 0
                 continue
 
             # ready delay
@@ -408,7 +412,7 @@ class S10PcieSource(S10PcieBase):
                     self.drive_sync.set()
                     self.active = True
                 else:
-                    self.bus.valid <= 0
+                    self.bus.valid.value = 0
                     self.active = bool(self.drive_obj)
                     if not self.drive_obj:
                         self.idle_event.set()
@@ -500,8 +504,8 @@ class S10PcieSink(S10PcieBase):
 
         self.bus.ready.setimmediatevalue(0)
 
-        cocotb.fork(self._run_sink())
-        cocotb.fork(self._run())
+        cocotb.start_soon(self._run_sink())
+        cocotb.start_soon(self._run())
 
     def _recv(self, frame):
         if self.queue.empty():
@@ -540,15 +544,17 @@ class S10PcieSink(S10PcieBase):
     async def _run_sink(self):
         ready_delay = []
 
+        clock_edge_event = RisingEdge(self.clock)
+
         while True:
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
             # read handshake signals
             ready_sample = self.bus.ready.value
             valid_sample = self.bus.valid.value
 
             if self.reset is not None and self.reset.value:
-                self.bus.ready <= 0
+                self.bus.ready.value = 0
                 continue
 
             # ready delay
@@ -565,7 +571,7 @@ class S10PcieSink(S10PcieBase):
             elif self.ready_latency > 0:
                 assert not valid_sample, "handshake error: valid asserted outside of ready cycle"
 
-            self.bus.ready <= (not self.full() and not self.pause)
+            self.bus.ready.value = (not self.full() and not self.pause)
 
     async def _run(self):
         self.active = False

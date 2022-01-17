@@ -626,30 +626,30 @@ class UltraScalePcieDevice(Device):
         # fork coroutines
 
         if self.user_clk is not None:
-            cocotb.fork(Clock(self.user_clk, int(1e9/self.user_clk_frequency), units="ns").start())
+            cocotb.start_soon(Clock(self.user_clk, int(1e9/self.user_clk_frequency), units="ns").start())
 
         if self.rq_sink:
-            cocotb.fork(self._run_rq_logic())
-            cocotb.fork(self._run_rq_np_queue_logic())
-            cocotb.fork(self._run_rq_seq_num_logic())
+            cocotb.start_soon(self._run_rq_logic())
+            cocotb.start_soon(self._run_rq_np_queue_logic())
+            cocotb.start_soon(self._run_rq_seq_num_logic())
         if self.rc_source:
-            cocotb.fork(self._run_rc_logic())
+            cocotb.start_soon(self._run_rc_logic())
         if self.cq_source:
-            cocotb.fork(self._run_cq_logic())
+            cocotb.start_soon(self._run_cq_logic())
         if self.cc_sink:
-            cocotb.fork(self._run_cc_logic())
+            cocotb.start_soon(self._run_cc_logic())
         if self.cfg_mgmt_addr is not None:
-            cocotb.fork(self._run_cfg_mgmt_logic())
-        cocotb.fork(self._run_cfg_status_logic())
+            cocotb.start_soon(self._run_cfg_mgmt_logic())
+        cocotb.start_soon(self._run_cfg_status_logic())
         if self.cfg_fc_sel is not None:
-            cocotb.fork(self._run_cfg_fc_logic())
-        cocotb.fork(self._run_cfg_ctrl_logic())
-        cocotb.fork(self._run_cfg_int_logic())
+            cocotb.start_soon(self._run_cfg_fc_logic())
+        cocotb.start_soon(self._run_cfg_ctrl_logic())
+        cocotb.start_soon(self._run_cfg_int_logic())
 
-        cocotb.fork(self._run_reset())
+        cocotb.start_soon(self._run_reset())
 
     async def upstream_recv(self, tlp):
-        self.log.debug("Got downstream TLP: %s", repr(tlp))
+        self.log.debug("Got downstream TLP: %r", tlp)
 
         if tlp.fmt_type in {TlpType.CFG_READ_0, TlpType.CFG_WRITE_0}:
             # config type 0
@@ -660,7 +660,7 @@ class UltraScalePcieDevice(Device):
                 tlp.release_fc()
 
                 cpl = Tlp.create_crs_completion_for_tlp(tlp, PcieId(self.bus_num, 0, 0))
-                self.log.debug("CRS Completion: %s", repr(cpl))
+                self.log.debug("CRS Completion: %r", cpl)
                 await self.upstream_send(cpl)
                 return
             else:
@@ -675,14 +675,14 @@ class UltraScalePcieDevice(Device):
 
                 tlp.release_fc()
 
-                self.log.warning("Function not found: failed to route config type 0 TLP")
+                self.log.warning("Function not found: failed to route config type 0 TLP: %r", tlp)
 
         elif tlp.fmt_type in {TlpType.CFG_READ_1, TlpType.CFG_WRITE_1}:
             # config type 1
 
             tlp.release_fc()
 
-            self.log.warning("Malformed TLP: endpoint received config type 1 TLP")
+            self.log.warning("Malformed TLP: endpoint received config type 1 TLP: %r", tlp)
         elif tlp.fmt_type in {TlpType.CPL, TlpType.CPL_DATA, TlpType.CPL_LOCKED, TlpType.CPL_LOCKED_DATA}:
             # Completion
 
@@ -697,22 +697,22 @@ class UltraScalePcieDevice(Device):
 
                     if tlp.ep:
                         # poisoned
-                        self.log.warning("Poisoned TLP")
+                        self.log.warning("Poisoned TLP: %r", tlp)
                         tlp.error_code = ErrorCode.POISONED
 
                     req = self.active_request[tlp.tag]
 
                     if not req:
                         # tag not active
-                        self.log.warning("Invalid tag")
+                        self.log.warning("Invalid tag: %r", tlp)
                         tlp.error_code = ErrorCode.INVALID_TAG
                     elif tlp.requester_id != req.requester_id or tlp.attr != req.attr or tlp.tc != req.tc:
                         # requester ID, ATTR, or TC field mismatch
-                        self.log.warning("Mismatched fields")
+                        self.log.warning("Mismatched fields: %r", tlp)
                         tlp.error_code = ErrorCode.MISMATCH
                     elif tlp.status != CplStatus.SC:
                         # bad status
-                        self.log.warning("Bad status")
+                        self.log.warning("Bad status: %r", tlp)
                         tlp.error_code = ErrorCode.BAD_STATUS
                         tlp.request_completed = True
                         self.active_request[tlp.tag] = None
@@ -723,7 +723,7 @@ class UltraScalePcieDevice(Device):
                         lower_address = req.address + req.get_first_be_offset() + req.get_be_byte_count() - tlp.byte_count
 
                         if tlp.lower_address != lower_address & 0x7f:
-                            self.log.warning("Lower address mismatch")
+                            self.log.warning("Lower address mismatch: %r", tlp)
                             tlp.error_code = ErrorCode.INVALID_ADDRESS
                         else:
                             tlp.lower_address = lower_address & 0xfff
@@ -754,20 +754,20 @@ class UltraScalePcieDevice(Device):
 
             tlp.release_fc()
 
-            self.log.warning("Unexpected completion: failed to route completion to function")
+            self.log.warning("Unexpected completion: failed to route completion to function: %r", tlp)
             return  # no UR response for completion
         elif tlp.fmt_type in {TlpType.IO_READ, TlpType.IO_WRITE}:
             # IO read/write
 
             for f in self.functions:
                 bar = f.match_bar(tlp.address, True)
-                if len(bar) == 1:
+                if bar:
 
                     tlp.release_fc()
 
                     tlp = Tlp_us(tlp)
-                    tlp.bar_id = bar[0][0]
-                    tlp.bar_aperture = (~self.functions[0].bar_mask[bar[0][0]] & 0xffffffff).bit_length()
+                    tlp.bar_id = bar[0]
+                    tlp.bar_aperture = (~self.functions[0].bar_mask[bar[0]] & 0xffffffff).bit_length()
                     tlp.completer_id = f.pcie_id
                     self.cq_queue.put_nowait(tlp)
 
@@ -775,23 +775,23 @@ class UltraScalePcieDevice(Device):
 
             tlp.release_fc()
 
-            self.log.warning("No BAR match: IO request did not match any BARs")
+            self.log.warning("No BAR match: IO request did not match any BARs: %r", tlp)
         elif tlp.fmt_type in {TlpType.MEM_READ, TlpType.MEM_READ_64, TlpType.MEM_WRITE, TlpType.MEM_WRITE_64}:
             # Memory read/write
 
             for f in self.functions:
                 bar = f.match_bar(tlp.address)
-                if len(bar) == 1:
+                if bar:
 
                     tlp.release_fc()
 
                     tlp = Tlp_us(tlp)
-                    tlp.bar_id = bar[0][0]
-                    if self.functions[0].bar[bar[0][0]] & 4:
-                        tlp.bar_aperture = (~(self.functions[0].bar_mask[bar[0][0]] |
-                            (self.functions[0].bar_mask[bar[0][0]+1] << 32)) & 0xffffffffffffffff).bit_length()
+                    tlp.bar_id = bar[0]
+                    if self.functions[0].bar[bar[0]] & 4:
+                        tlp.bar_aperture = (~(self.functions[0].bar_mask[bar[0]] |
+                            (self.functions[0].bar_mask[bar[0]+1] << 32)) & 0xffffffffffffffff).bit_length()
                     else:
-                        tlp.bar_aperture = (~self.functions[0].bar_mask[bar[0][0]] & 0xffffffff).bit_length()
+                        tlp.bar_aperture = (~self.functions[0].bar_mask[bar[0]] & 0xffffffff).bit_length()
                     tlp.completer_id = tlp.completer_id._replace(bus=self.bus_num)
                     self.cq_queue.put_nowait(tlp)
 
@@ -800,25 +800,27 @@ class UltraScalePcieDevice(Device):
             tlp.release_fc()
 
             if tlp.fmt_type in {TlpType.MEM_WRITE, TlpType.MEM_WRITE_64}:
-                self.log.warning("No BAR match: memory write request did not match any BARs")
+                self.log.warning("No BAR match: memory write request did not match any BARs: %r", tlp)
                 return  # no UR response for write request
             else:
-                self.log.warning("No BAR match: memory read request did not match any BARs")
+                self.log.warning("No BAR match: memory read request did not match any BARs: %r", tlp)
         else:
             raise Exception("TODO")
 
         # Unsupported request
         cpl = Tlp.create_ur_completion_for_tlp(tlp, PcieId(self.bus_num, 0, 0))
-        self.log.debug("UR Completion: %s", repr(cpl))
+        self.log.debug("UR Completion: %r", cpl)
         await self.upstream_send(cpl)
 
     async def _run_reset(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
+            await clock_edge_event
 
             if self.user_reset is not None:
-                self.user_reset <= 1
+                self.user_reset.value = 1
 
             if self.sys_reset is not None:
                 if not self.sys_reset.value:
@@ -832,7 +834,7 @@ class UltraScalePcieDevice(Device):
                 await RisingEdge(self.user_clk)
 
             if self.user_reset is not None:
-                self.user_reset <= 0
+                self.user_reset.value = 0
 
             if self.sys_reset is not None:
                 await FallingEdge(self.sys_reset)
@@ -844,8 +846,10 @@ class UltraScalePcieDevice(Device):
             # pcie_perstn1_out
 
     async def _run_cq_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # increment cq_np_req_count and saturate at 32
             if self.pcie_cq_np_req is None or self.pcie_cq_np_req.value:
@@ -877,7 +881,7 @@ class UltraScalePcieDevice(Device):
 
             # output new cq_np_req_count
             if self.pcie_cq_np_req_count is not None:
-                self.pcie_cq_np_req_count <= self.cq_np_req_count
+                self.pcie_cq_np_req_count.value = self.cq_np_req_count
 
     async def _run_cc_logic(self):
         while True:
@@ -958,14 +962,16 @@ class UltraScalePcieDevice(Device):
                 # TODO: internal response
 
     async def _run_rq_seq_num_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             if self.pcie_rq_seq_num is not None:
-                self.pcie_rq_seq_num_vld <= 0
+                self.pcie_rq_seq_num_vld.value = 0
                 if not self.rq_seq_num.empty():
-                    self.pcie_rq_seq_num <= self.rq_seq_num.get_nowait()
-                    self.pcie_rq_seq_num_vld <= 1
+                    self.pcie_rq_seq_num.value = self.rq_seq_num.get_nowait()
+                    self.pcie_rq_seq_num_vld.value = 1
             elif not self.rq_seq_num.empty():
                 self.rq_seq_num.get_nowait()
 
@@ -977,19 +983,23 @@ class UltraScalePcieDevice(Device):
             await self.rc_source.send(tlp.pack_us_rc())
 
     async def _run_tx_fc_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # transmit flow control
             # TODO
             if self.pcie_tfc_nph_av is not None:
-                self.pcie_tfc_nph_av <= 0x3
+                self.pcie_tfc_nph_av.value = 0x3
             if self.pcie_tfc_npd_av is not None:
-                self.pcie_tfc_npd_av <= 0x3
+                self.pcie_tfc_npd_av.value = 0x3
 
     async def _run_cfg_mgmt_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # configuration management
             cfg_mgmt_addr = self.cfg_mgmt_addr.value.integer
@@ -1001,7 +1011,7 @@ class UltraScalePcieDevice(Device):
             cfg_mgmt_write = self.cfg_mgmt_write.value.integer
 
             if self.cfg_mgmt_read_write_done.value:
-                self.cfg_mgmt_read_write_done <= 0
+                self.cfg_mgmt_read_write_done.value = 0
             elif cfg_mgmt_read or cfg_mgmt_write:
                 for k in range(3):
                     await RisingEdge(self.user_clk)
@@ -1010,41 +1020,43 @@ class UltraScalePcieDevice(Device):
                         # internal register access
                         pass
                     else:
-                        self.cfg_mgmt_read_data <= await self.functions[function].read_config_register(reg_num)
+                        self.cfg_mgmt_read_data.value = await self.functions[function].read_config_register(reg_num)
                 else:
                     if cfg_mgmt_addr & (1 << 18):
                         # internal register access
                         pass
                     else:
                         await self.functions[function].write_config_register(reg_num, write_data, byte_enable)
-                self.cfg_mgmt_read_write_done <= 1
+                self.cfg_mgmt_read_write_done.value = 1
             # cfg_mgmt_type1_cfg_reg_access
 
     async def _run_cfg_status_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # configuration status
             if self.sys_reset is not None and not self.sys_reset.value:
                 if self.cfg_phy_link_down is not None:
-                    self.cfg_phy_link_down <= 1
+                    self.cfg_phy_link_down.value = 1
                 if self.user_lnk_up is not None:
-                    self.user_lnk_up <= 0
+                    self.user_lnk_up.value = 0
             else:
                 if self.cfg_phy_link_down is not None:
-                    self.cfg_phy_link_down <= 0  # TODO
+                    self.cfg_phy_link_down.value = 0  # TODO
                 if self.user_lnk_up is not None:
-                    self.user_lnk_up <= 1  # TODO
+                    self.user_lnk_up.value = 1  # TODO
 
             # cfg_phy_link_status
             if self.cfg_negotiated_width is not None:
-                self.cfg_negotiated_width <= self.functions[0].pcie_cap.negotiated_link_width
+                self.cfg_negotiated_width.value = self.functions[0].pcie_cap.negotiated_link_width
             if self.cfg_current_speed is not None:
-                self.cfg_current_speed <= (1 << (self.functions[0].pcie_cap.current_link_speed & 3)) >> 1
+                self.cfg_current_speed.value = (1 << (self.functions[0].pcie_cap.current_link_speed & 3)) >> 1
             if self.cfg_max_payload is not None:
-                self.cfg_max_payload <= self.functions[0].pcie_cap.max_payload_size
+                self.cfg_max_payload.value = self.functions[0].pcie_cap.max_payload_size
             if self.cfg_max_read_req is not None:
-                self.cfg_max_read_req <= self.functions[0].pcie_cap.max_read_request_size
+                self.cfg_max_read_req.value = self.functions[0].pcie_cap.max_read_request_size
 
             if self.cfg_function_status is not None:
                 status = 0
@@ -1053,7 +1065,7 @@ class UltraScalePcieDevice(Device):
                         status |= 0x07 << k*4
                     if self.functions[k].interrupt_disable:
                         status |= 0x08 << k*4
-                self.cfg_function_status <= status
+                self.cfg_function_status.value = status
 
             # cfg_vf_status
             # cfg_function_power_state
@@ -1071,7 +1083,7 @@ class UltraScalePcieDevice(Device):
                 for k in range(len(self.functions)):
                     if self.functions[k].read_completion_boundary:
                         status |= 1 << k
-                self.cfg_rcb_status <= status
+                self.cfg_rcb_status.value = status
 
             # cfg_dpa_substate_change
             # cfg_obff_enable
@@ -1088,16 +1100,20 @@ class UltraScalePcieDevice(Device):
             # cfg_per_function_update_done
 
     async def _run_cfg_msg_rx_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # cfg_msg_received
             # cfg_msg_received_data
             # cfg_msg_received_type
 
     async def _run_cfg_msg_tx_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # cfg_msg_transmit
             # cfg_msg_transmit_type
@@ -1105,8 +1121,10 @@ class UltraScalePcieDevice(Device):
             # cfg_msg_transmit_done
 
     async def _run_cfg_fc_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             if isinstance(self.cfg_fc_sel, int):
                 sel = self.cfg_fc_sel
@@ -1180,21 +1198,23 @@ class UltraScalePcieDevice(Device):
                 cfg_fc_cpld = 0
 
             if self.cfg_fc_ph is not None:
-                self.cfg_fc_ph <= cfg_fc_ph
+                self.cfg_fc_ph.value = cfg_fc_ph
             if self.cfg_fc_pd is not None:
-                self.cfg_fc_pd <= cfg_fc_pd
+                self.cfg_fc_pd.value = cfg_fc_pd
             if self.cfg_fc_nph is not None:
-                self.cfg_fc_nph <= cfg_fc_nph
+                self.cfg_fc_nph.value = cfg_fc_nph
             if self.cfg_fc_npd is not None:
-                self.cfg_fc_npd <= cfg_fc_npd
+                self.cfg_fc_npd.value = cfg_fc_npd
             if self.cfg_fc_cplh is not None:
-                self.cfg_fc_cplh <= cfg_fc_cplh
+                self.cfg_fc_cplh.value = cfg_fc_cplh
             if self.cfg_fc_cpld is not None:
-                self.cfg_fc_cpld <= cfg_fc_cpld
+                self.cfg_fc_cpld.value = cfg_fc_cpld
 
     async def _run_cfg_ctrl_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             if self.sys_reset is not None and not self.sys_reset.value:
                 self.config_space_enable = False
@@ -1224,8 +1244,10 @@ class UltraScalePcieDevice(Device):
             # cfg_link_training_enable
 
     async def _run_cfg_int_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             msi_int = 0
             msi_function_number = 0
@@ -1270,37 +1292,38 @@ class UltraScalePcieDevice(Device):
                 for k in range(min(len(self.functions), 2)):
                     if self.functions[k].msi_cap.msi_enable:
                         val |= 1 << k
-                self.cfg_interrupt_msi_enable <= val
+                self.cfg_interrupt_msi_enable.value = val
 
             # cfg_interrupt_msi_vf_enable
 
             if self.cfg_interrupt_msi_sent is not None:
-                self.cfg_interrupt_msi_sent <= 0
+                self.cfg_interrupt_msi_sent.value = 0
             if self.cfg_interrupt_msi_fail is not None:
-                self.cfg_interrupt_msi_fail <= 0
+                self.cfg_interrupt_msi_fail.value = 0
             if msi_int:
                 bits = [i for i in range(32) if msi_int >> i & 1]
                 if len(bits) == 1 and msi_function_number < len(self.functions):
+                    self.log.info("Issue MSI interrupt (index %d)", bits[0])
                     await self.functions[msi_function_number].msi_cap.issue_msi_interrupt(bits[0], attr=msi_attr)
                     if self.cfg_interrupt_msi_sent is not None:
-                        self.cfg_interrupt_msi_sent <= 1
+                        self.cfg_interrupt_msi_sent.value = 1
 
             if self.cfg_interrupt_msi_mmenable is not None:
                 val = 0
                 for k in range(min(len(self.functions), 2)):
                     val |= (self.functions[k].msi_cap.msi_multiple_message_enable & 0x7) << k*3
-                self.cfg_interrupt_msi_mmenable <= val
+                self.cfg_interrupt_msi_mmenable.value = val
 
             # cfg_interrupt_msi_mask_update
 
             if self.cfg_interrupt_msi_data is not None:
                 if msi_select == 0b1111:
-                    self.cfg_interrupt_msi_data <= 0
+                    self.cfg_interrupt_msi_data.value = 0
                 else:
                     if msi_select < len(self.functions):
-                        self.cfg_interrupt_msi_data <= self.functions[msi_select].msi_cap.msi_mask_bits
+                        self.cfg_interrupt_msi_data.value = self.functions[msi_select].msi_cap.msi_mask_bits
                     else:
-                        self.cfg_interrupt_msi_data <= 0
+                        self.cfg_interrupt_msi_data.value = 0
             if msi_pending_status_data_enable:
                 if msi_pending_status_function_num < len(self.functions):
                     self.functions[msi_pending_status_function_num].msi_cap.msi_pending_bits = msi_pending_status
@@ -1311,21 +1334,22 @@ class UltraScalePcieDevice(Device):
                 for k in range(min(len(self.functions), 2)):
                     if self.functions[k].msix_cap.msix_enable:
                         val |= 1 << k
-                self.cfg_interrupt_msix_enable <= val
+                self.cfg_interrupt_msix_enable.value = val
             if self.cfg_interrupt_msix_mask is not None:
                 val = 0
                 for k in range(min(len(self.functions), 2)):
                     if self.functions[k].msix_cap.msix_function_mask:
                         val |= 1 << k
-                self.cfg_interrupt_msix_mask <= val
+                self.cfg_interrupt_msix_mask.value = val
             # cfg_interrupt_msix_vf_enable
             # cfg_interrupt_msix_vf_mask
 
             if msix_int:
                 if msi_function_number < len(self.functions):
+                    self.log.info("Issue MSI-X interrupt (addr 0x%08x, data 0x%08x)", msix_address, msix_data)
                     await self.functions[msi_function_number].msix_cap.issue_msix_interrupt(msix_address, msix_data, attr=msi_attr)
                     if self.cfg_interrupt_msi_sent is not None:
-                        self.cfg_interrupt_msi_sent <= 1
+                        self.cfg_interrupt_msi_sent.value = 1
 
             # MSI/MSI-X
             # cfg_interrupt_msi_tph_present
@@ -1333,8 +1357,10 @@ class UltraScalePcieDevice(Device):
             # cfg_interrupt_msi_tph_st_tag
 
     async def _run_cfg_extend_logic(self):
+        clock_edge_event = RisingEdge(self.user_clk)
+
         while True:
-            await RisingEdge(self.user_clk)
+            await clock_edge_event
 
             # cfg_ext_read_received
             # cfg_ext_write_received

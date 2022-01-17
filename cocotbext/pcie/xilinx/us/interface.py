@@ -184,15 +184,17 @@ class UsPcieBase:
         self._pause_generator = generator
 
         if self._pause_generator is not None:
-            self._pause_cr = cocotb.fork(self._run_pause())
+            self._pause_cr = cocotb.start_soon(self._run_pause())
 
     def clear_pause_generator(self):
         self.set_pause_generator(None)
 
     async def _run_pause(self):
+        clock_edge_event = RisingEdge(self.clock)
+
         for val in self._pause_generator:
             self.pause = val
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
 
 class UsPcieSource(UsPcieBase):
@@ -222,8 +224,8 @@ class UsPcieSource(UsPcieBase):
 
         self._init()
 
-        cocotb.fork(self._run_source())
-        cocotb.fork(self._run())
+        cocotb.start_soon(self._run_source())
+        cocotb.start_soon(self._run())
 
     async def _drive(self, obj):
         if self.drive_obj is not None:
@@ -268,8 +270,10 @@ class UsPcieSource(UsPcieBase):
     async def _run_source(self):
         self.active = False
 
+        clock_edge_event = RisingEdge(self.clock)
+
         while True:
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
             # read handshake signals
             tready_sample = self.bus.tready.value
@@ -277,11 +281,7 @@ class UsPcieSource(UsPcieBase):
 
             if self.reset is not None and self.reset.value:
                 self.active = False
-                self.bus.tdata <= 0
-                self.bus.tvalid <= 0
-                self.bus.tlast <= 0
-                self.bus.tkeep <= 0
-                self.bus.tuser <= 0
+                self.bus.tvalid.value = 0
                 continue
 
             if (tready_sample and tvalid_sample) or not tvalid_sample:
@@ -289,10 +289,10 @@ class UsPcieSource(UsPcieBase):
                     self.bus.drive(self.drive_obj)
                     self.drive_obj = None
                     self.drive_sync.set()
-                    self.bus.tvalid <= 1
+                    self.bus.tvalid.value = 1
                     self.active = True
                 else:
-                    self.bus.tvalid <= 0
+                    self.bus.tvalid.value = 0
                     self.active = bool(self.drive_obj)
                     if not self.drive_obj:
                         self.idle_event.set()
@@ -338,8 +338,8 @@ class UsPcieSink(UsPcieBase):
 
         self._init()
 
-        cocotb.fork(self._run_sink())
-        cocotb.fork(self._run())
+        cocotb.start_soon(self._run_sink())
+        cocotb.start_soon(self._run())
 
     def _recv(self, frame):
         if self.queue.empty():
@@ -376,15 +376,17 @@ class UsPcieSink(UsPcieBase):
             await self.active_event.wait()
 
     async def _run_sink(self):
+        clock_edge_event = RisingEdge(self.clock)
+
         while True:
-            await RisingEdge(self.clock)
+            await clock_edge_event
 
             # read handshake signals
             tready_sample = self.bus.tready.value
             tvalid_sample = self.bus.tvalid.value
 
             if self.reset is not None and self.reset.value:
-                self.bus.tready <= 0
+                self.bus.tready.value = 0
                 continue
 
             if tready_sample and tvalid_sample:
@@ -392,7 +394,7 @@ class UsPcieSink(UsPcieBase):
                 self.bus.sample(self.sample_obj)
                 self.sample_sync.set()
 
-            self.bus.tready <= (not self.full() and not self.pause)
+            self.bus.tready.value = (not self.full() and not self.pause)
 
     async def _run(self):
         raise NotImplementedError()
