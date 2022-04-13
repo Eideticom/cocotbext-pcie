@@ -178,7 +178,16 @@ class RootComplex(Switch):
         self.log.debug("Got TLP: %r", tlp)
         assert tlp.check()
         await self.handle_tlp(tlp)
-
+    
+    async def mem_rd_completions_timeout(self):
+        if self.mem_rd_timestamp is None:
+            self.mem_rd_timestamp = cocotb.utils.get_sim_time(self.mem_rd_timeout_units)
+        
+        wdt = Timer(self.mem_rd_timeout, self.mem_rd_timeout_units)
+        first = await First(self.mem_rd_queue_event.wait(), wdt)
+        if first == wdt:
+            self.send_mem_rd_completions()
+    
     async def handle_tlp(self, tlp):
         if tlp.fmt_type in {TlpType.CPL, TlpType.CPL_DATA, TlpType.CPL_LOCKED, TlpType.CPL_LOCKED_DATA}:
             self.rx_cpl_queues[tlp.tag].put_nowait(tlp)
@@ -192,11 +201,8 @@ class RootComplex(Switch):
                 if self.mem_rd_max_cnt is not None and self.mem_rd_queue.qsize() >= self.mem_rd_max_cnt:
                     self.send_mem_rd_completions()
                 if self.mem_rd_timeout is not None:
-                    if self.mem_rd_timestamp is None:
-                        self.mem_rd_timestamp = cocotb.utils.get_sim_time(self.mem_rd_timeout_units)
-                    elif (self.mem_rd_timeout + self.mem_rd_timestamp) >= cocotb.utils.get_sim_time(self.mem_rd_timeout_units):
-                        self.send_mem_rd_completions()
-                        
+                    cocotb.start_soon(self.mem_rd_completions_timeout())
+                    
             else:
                 await self.rx_tlp_handler[tlp.fmt_type](tlp)
         else:
