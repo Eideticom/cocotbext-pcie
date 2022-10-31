@@ -1,5 +1,20 @@
 # PCI express simulation framework for Cocotb
 
+## Eideticom Fork
+PCIe specs don't guarantee that read completion requests are returned in order, only that the TLPs belonging to one single RD/RQST are address increasing.
+
+Extra functionality was added to rc.py to mimic that behaviour (disabled by default)
+
+```python
+# Create RootComplex with random-in-time MemRD completion response
+self.rc = RootComplex(...)
+
+# Send after timeout or after max_cnt reached (aka max. #holding completion responses)
+self.rc.enable_rnd_mem_rd_completions_order(timeout=None, timeout_units='us', max_cnt=None)
+```
+
+---
+
 [![Build Status](https://github.com/alexforencich/cocotbext-pcie/workflows/Regression%20Tests/badge.svg?branch=master)](https://github.com/alexforencich/cocotbext-pcie/actions/)
 [![codecov](https://codecov.io/gh/alexforencich/cocotbext-pcie/branch/master/graph/badge.svg)](https://codecov.io/gh/alexforencich/cocotbext-pcie)
 [![PyPI version](https://badge.fury.io/py/cocotbext-pcie.svg)](https://pypi.org/project/cocotbext-pcie)
