@@ -15,8 +15,8 @@ self.rc.enable_rnd_mem_rd_completions_order(timeout=None, timeout_units='us', ma
 
 ---
 
-[![Build Status](https://github.com/alexforencich/cocotbext-pcie/workflows/Regression%20Tests/badge.svg?branch=master)](https://github.com/alexforencich/cocotbext-pcie/actions/)
 [![Regression Tests](https://github.com/alexforencich/cocotbext-pcie/actions/workflows/regression-tests.yml/badge.svg)](https://github.com/alexforencich/cocotbext-pcie/actions/workflows/regression-tests.yml)
+[![Build Status](https://github.com/alexforencich/cocotbext-pcie/workflows/Regression%20Tests/badge.svg?branch=master)](https://github.com/alexforencich/cocotbext-pcie/actions/)
 [![codecov](https://codecov.io/gh/alexforencich/cocotbext-pcie/branch/master/graph/badge.svg)](https://codecov.io/gh/alexforencich/cocotbext-pcie)
 [![PyPI version](https://badge.fury.io/py/cocotbext-pcie.svg)](https://pypi.org/project/cocotbext-pcie)
 [![Downloads](https://pepy.tech/badge/cocotbext-pcie)](https://pepy.tech/project/cocotbext-pcie)
