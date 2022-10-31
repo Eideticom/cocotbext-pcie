@@ -82,6 +82,8 @@ class Switch:
 
         self.min_dev = 1
         self.endpoints = []
+        
+        self.report_failed_route_config_type = False
 
     @property
     def pcie_id(self):
