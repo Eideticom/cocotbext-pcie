@@ -207,12 +207,14 @@ class RootComplex(Switch):
         await self.handle_tlp(tlp)
     
     async def mem_rd_completions_timeout(self):
+        self.log.info(f"MemRD Timeout set with {self.mem_rd_timeout} {self.mem_rd_timeout_units}")
         if self.mem_rd_timestamp is None:
             self.mem_rd_timestamp = cocotb.utils.get_sim_time(self.mem_rd_timeout_units)
         
-        wdt = Timer(self.mem_rd_timeout, self.mem_rd_timeout_units)
-        first = await First(self.mem_rd_queue_event.wait(), wdt)
+        wdt = Timer(time=self.mem_rd_timeout, units=self.mem_rd_timeout_units)
+        first = await First(wdt, self.mem_rd_queue_event.wait())
         if first == wdt:
+            self.log.info(f"MemRD Timeout triggered")
             self.send_mem_rd_completions()
     
     async def handle_tlp(self, tlp):
@@ -222,6 +224,7 @@ class RootComplex(Switch):
         elif tlp.fmt_type in self.rx_tlp_handler:
             tlp.release_fc()
             if self.mem_rd_queue_enable and tlp.fmt_type in [TlpType.MEM_READ, TlpType.MEM_READ_64]:
+                self.log.info("Queued MemRD TLP")
                 if self.mem_rd_queue_fsm in [self.MEM_RD_QUEUE_STATE.DISABLED, self.MEM_RD_QUEUE_STATE.EMPTY]:
                     self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.ON_HOLD
                 self.mem_rd_queue.put_nowait(tlp)
@@ -446,7 +449,7 @@ class RootComplex(Switch):
     async def enable_rnd_mem_rd_completions_order(self, timeout=None, timeout_units='us', max_cnt=None):
         # -------------------------------------
         # MemRD Un-ordered completion generator
-        self.log.info("Out-of-order MemRD completion TLP tx enabled")
+        self.log.info("<RC:MemRD-RND> Out-of-order MemRD completion TLP tx enabled (memrd_rnd)")
         self.mem_rd_queue_enable = True
         self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.EMPTY
         
@@ -457,7 +460,7 @@ class RootComplex(Switch):
         
         self.mem_rd_queue = Queue()
         self.mem_rd_queue_event = Event('mem_rd_queue')
-        cocotb.fork(self.handle_mem_read_tlp_queue())
+        await cocotb.start(self.handle_mem_read_tlp_queue())
     
     def send_mem_rd_completions(self):
         self.mem_rd_queue_event.set()
