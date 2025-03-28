@@ -23,7 +23,10 @@ THE SOFTWARE.
 """
 
 import logging
+from enum import Enum
+from random import shuffle
 
+import cocotb
 from cocotb.queue import Queue
 from cocotb.triggers import Event, Timer, First
 
@@ -40,6 +43,12 @@ from .pci import PciDevice, PciHostBridge
 
 
 class RootComplex(Switch):
+    class MEM_RD_QUEUE_STATE(Enum):
+        DISABLED = 0
+        EMPTY = 1
+        ON_HOLD = 2
+        SENDING = 3
+        
     def __init__(self, mem_address_space=None, io_address_space=None, *args, **kwargs):
 
         self.default_upstream_bridge = HostBridge
@@ -68,6 +77,8 @@ class RootComplex(Switch):
         self.rx_cpl_sync = [Event() for k in range(256)]
 
         self.rx_tlp_handler = {}
+        self.mem_rd_queue_enable = False
+        self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.DISABLED
 
         self.upstream_bridge.upstream_tx_handler = self.downstream_recv
 
@@ -204,14 +215,36 @@ class RootComplex(Switch):
         self.log.debug("Got TLP: %r", tlp)
         assert tlp.check()
         await self.handle_tlp(tlp)
-
+    
+    async def mem_rd_completions_timeout(self):
+        self.log.info(f"MemRD Timeout set with {self.mem_rd_timeout} {self.mem_rd_timeout_units}")
+        if self.mem_rd_timestamp is None:
+            self.mem_rd_timestamp = cocotb.utils.get_sim_time(self.mem_rd_timeout_units)
+        
+        wdt = Timer(time=self.mem_rd_timeout, units=self.mem_rd_timeout_units)
+        first = await First(wdt, self.mem_rd_queue_event.wait())
+        if first == wdt:
+            self.log.info(f"MemRD Timeout triggered")
+            self.send_mem_rd_completions()
+    
     async def handle_tlp(self, tlp):
         if tlp.fmt_type in {TlpType.CPL, TlpType.CPL_DATA, TlpType.CPL_LOCKED, TlpType.CPL_LOCKED_DATA}:
             self.rx_cpl_queues[tlp.tag].put_nowait(tlp)
             self.rx_cpl_sync[tlp.tag].set()
         elif tlp.fmt_type in self.rx_tlp_handler:
             tlp.release_fc()
-            await self.rx_tlp_handler[tlp.fmt_type](tlp)
+            if self.mem_rd_queue_enable and tlp.fmt_type in [TlpType.MEM_READ, TlpType.MEM_READ_64]:
+                self.log.info("Queued MemRD TLP")
+                if self.mem_rd_queue_fsm in [self.MEM_RD_QUEUE_STATE.DISABLED, self.MEM_RD_QUEUE_STATE.EMPTY]:
+                    self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.ON_HOLD
+                self.mem_rd_queue.put_nowait(tlp)
+                if self.mem_rd_max_cnt is not None and self.mem_rd_queue.qsize() >= self.mem_rd_max_cnt:
+                    self.send_mem_rd_completions()
+                if self.mem_rd_timeout is not None:
+                    cocotb.start_soon(self.mem_rd_completions_timeout())
+                
+            else:
+                await self.rx_tlp_handler[tlp.fmt_type](tlp)
         else:
             tlp.release_fc()
             raise Exception("Unhandled TLP")
@@ -422,6 +455,44 @@ class RootComplex(Switch):
 
         self.log.debug("Completion: %r", cpl)
         await self.send(cpl)
+
+    async def enable_rnd_mem_rd_completions_order(self, timeout=None, timeout_units='us', max_cnt=None):
+        # -------------------------------------
+        # MemRD Un-ordered completion generator
+        self.log.info("<RC:MemRD-RND> Out-of-order MemRD completion TLP tx enabled (memrd_rnd)")
+        self.mem_rd_queue_enable = True
+        self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.EMPTY
+        
+        self.mem_rd_timeout_units = timeout_units
+        self.mem_rd_timeout = timeout
+        self.mem_rd_timestamp = None
+        self.mem_rd_max_cnt = max_cnt
+        
+        self.mem_rd_queue = Queue()
+        self.mem_rd_queue_event = Event('mem_rd_queue')
+        await cocotb.start(self.handle_mem_read_tlp_queue())
+    
+    def send_mem_rd_completions(self):
+        self.mem_rd_queue_event.set()
+        self.mem_rd_timestamp = None
+        
+    async def handle_mem_read_tlp_queue(self):
+        while self.mem_rd_queue_enable:
+            await self.mem_rd_queue_event.wait()
+            self.log.info(f"Start MemRD completion responses...")
+            tlps = []
+            while not self.mem_rd_queue.empty():
+                tlps.append(self.mem_rd_queue.get_nowait())
+                
+            if tlps:
+                shuffle(tlps)
+                self.log.info(f"Out-of-order MemRD: sending {len(tlps)} MemRD completions")
+                self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.SENDING
+                for inx, tlp in enumerate(tlps):
+                    await self.handle_mem_read_tlp(tlp)
+                self.mem_rd_queue_fsm = self.MEM_RD_QUEUE_STATE.EMPTY
+                
+            self.mem_rd_queue_event.clear()
 
     async def handle_mem_read_tlp(self, tlp):
         self.log.info("Memory read, address 0x%08x, length %d, BE 0x%x/0x%x, tag %d",
