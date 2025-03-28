@@ -90,7 +90,7 @@ class Device:
         self.functions.sort(key=lambda x: x.function_num)
         if len(self.functions) > 1:
             for f in self.functions:
-                f.multifunction_devlce = True
+                f.multifunction_device = True
         return function
 
     def append_function(self, function):
@@ -116,7 +116,7 @@ class Device:
             # config type 0
 
             # capture address information
-            self.bus_num = tlp.dest_id.bus
+            self.bus_num = tlp.completer_id.bus
 
         # pass TLP to function
         for f in self.functions:

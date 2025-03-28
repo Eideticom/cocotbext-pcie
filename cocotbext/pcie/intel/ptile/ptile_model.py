@@ -123,6 +123,7 @@ def init_signal(sig, width=None, initval=None):
 class PTilePcieDevice(Device):
     def __init__(self,
             # configuration options
+            port_num=0,
             pcie_generation=None,
             pcie_link_width=None,
             pld_clk_frequency=None,
@@ -329,7 +330,23 @@ class PTilePcieDevice(Device):
 
         self.rx_queue = Queue()
 
+        if port_num == 0:
+            # UG lists 1144 CPLH and 1444 "256 bit" CPLD
+            # Tests confirm >=1024 CPLH and >=2888 CPLD
+            self.rx_buf_cplh_fc_limit = 1144
+            self.rx_buf_cpld_fc_limit = 1444 * 2
+        elif port_num == 1:
+            self.rx_buf_cplh_fc_limit = 572
+            self.rx_buf_cpld_fc_limit = 1444
+        else:
+            self.rx_buf_cplh_fc_limit = 286
+            self.rx_buf_cpld_fc_limit = 1444 // 2
+
+        self.rx_buf_cplh_fc_count = 0
+        self.rx_buf_cpld_fc_count = 0
+
         # configuration options
+        self.port_num = port_num
         self.pcie_generation = pcie_generation
         self.pcie_link_width = pcie_link_width
         self.pld_clk_frequency = pld_clk_frequency
@@ -555,6 +572,14 @@ class PTilePcieDevice(Device):
                 if self.pld_clk_frequency is not None and self.pld_clk_frequency != config[3]:
                     continue
 
+                if self.pcie_link_width is not None:
+                    if self.port_num == 1 and config[1] > 8:
+                        # port 1 only supports x4 and x8
+                        continue
+                    if self.port_num >= 2 and config[1] > 4:
+                        # ports 2 and 3 only supports x4
+                        continue
+
                 # set the unspecified parameters
                 if self.pcie_generation is None:
                     self.log.info("Setting PCIe speed to gen %d", config[0])
@@ -574,6 +599,7 @@ class PTilePcieDevice(Device):
         self.log.info("  PF count: %d", self.pf_count)
         self.log.info("  Max payload size: %d", self.max_payload_size)
         self.log.info("  Enable extended tag: %s", self.enable_extended_tag)
+        self.log.info("  P-tile port number: %d", self.port_num)
         self.log.info("  Enable PF0 MSI: %s", self.pf0_msi_enable)
         self.log.info("  PF0 MSI vector count: %d", self.pf0_msi_count)
         self.log.info("  Enable PF1 MSI: %s", self.pf1_msi_enable)
@@ -621,6 +647,13 @@ class PTilePcieDevice(Device):
             if self.dw != config[2]:
                 continue
             if self.pld_clk_frequency != config[3]:
+                continue
+
+            if self.port_num == 1 and config[1] > 8:
+                # port 1 only supports x4 and x8
+                continue
+            if self.port_num >= 2 and config[1] > 4:
+                # ports 2 and 3 only supports x4
                 continue
 
             config_valid = True
@@ -728,11 +761,11 @@ class PTilePcieDevice(Device):
             # config type 0
 
             # capture address information
-            self.bus_num = tlp.dest_id.bus
+            self.bus_num = tlp.completer_id.bus
 
             # pass TLP to function
             for f in self.functions:
-                if f.pcie_id == tlp.dest_id:
+                if f.pcie_id == tlp.completer_id:
                     await f.upstream_recv(tlp)
                     return
 
@@ -755,7 +788,16 @@ class PTilePcieDevice(Device):
 
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    # check and track buffer occupancy
+                    data_fc = tlp.get_data_credits()
+
+                    if self.rx_buf_cplh_fc_count+1 <= self.rx_buf_cplh_fc_limit and self.rx_buf_cpld_fc_count+data_fc <= self.rx_buf_cpld_fc_limit:
+                        self.rx_buf_cplh_fc_count += 1
+                        self.rx_buf_cpld_fc_count += data_fc
+                        await self.rx_queue.put((tlp, frame))
+                    else:
+                        self.log.warning("No space in RX completion buffer, dropping TLP: CPLH %d (limit %d), CPLD %d (limit %d)",
+                            self.rx_buf_cplh_fc_count, self.rx_buf_cplh_fc_limit, self.rx_buf_cpld_fc_count, self.rx_buf_cpld_fc_limit)
 
                     tlp.release_fc()
 
@@ -777,7 +819,7 @@ class PTilePcieDevice(Device):
                     frame.bar_range = 6
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    await self.rx_queue.put((tlp, frame))
 
                     tlp.release_fc()
 
@@ -798,7 +840,7 @@ class PTilePcieDevice(Device):
                     frame.bar_range = bar[0]
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    await self.rx_queue.put((tlp, frame))
 
                     tlp.release_fc()
 
@@ -854,8 +896,11 @@ class PTilePcieDevice(Device):
 
     async def _run_rx_logic(self):
         while True:
-            frame = await self.rx_queue.get()
+            tlp, frame = await self.rx_queue.get()
             await self.rx_source.send(frame)
+
+            self.rx_buf_cplh_fc_count = max(self.rx_buf_cplh_fc_count-1, 0)
+            self.rx_buf_cpld_fc_count = max(self.rx_buf_cpld_fc_count-tlp.get_data_credits(), 0)
 
     async def _run_tx_logic(self):
         while True:

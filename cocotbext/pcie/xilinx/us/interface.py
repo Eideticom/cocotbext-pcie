@@ -128,7 +128,10 @@ class UsPcieBase:
         self.bus = bus
         self.clock = clock
         self.reset = reset
-        self.log = logging.getLogger(f"cocotb.{bus._entity._name}.{bus._name}")
+        if bus._name:
+            self.log = logging.getLogger(f"cocotb.{bus._entity._name}.{bus._name}")
+        else:
+            self.log = logging.getLogger(f"cocotb.{bus._entity._name}")
 
         super().__init__(*args, **kwargs)
 
@@ -138,8 +141,10 @@ class UsPcieBase:
         self.idle_event = Event()
         self.idle_event.set()
         self.active_event = Event()
+        self.bus_active_event = Event()
+        self.wake_event = Event()
 
-        self.pause = False
+        self._pause = False
         self._pause_generator = None
         self._pause_cr = None
 
@@ -182,6 +187,19 @@ class UsPcieBase:
 
     async def wait(self):
         raise NotImplementedError()
+
+    def _pause_update(self, val):
+        pass
+
+    @property
+    def pause(self):
+        return self._pause
+
+    @pause.setter
+    def pause(self, val):
+        if self._pause != val:
+            self._pause_update(val)
+        self._pause = val
 
     def set_pause_generator(self, generator=None):
         if self._pause_cr is not None:
@@ -240,6 +258,7 @@ class UsPcieSource(UsPcieBase):
             await self.drive_sync.wait()
 
         self.drive_obj = obj
+        self.bus_active_event.set()
 
     async def send(self, frame):
         while self.full():
@@ -303,6 +322,9 @@ class UsPcieSource(UsPcieBase):
                     self.active = bool(self.drive_obj)
                     if not self.drive_obj:
                         self.idle_event.set()
+                        self.bus_active_event.clear()
+
+                        await self.bus_active_event.wait()
 
     async def _run(self):
         raise NotImplementedError
@@ -348,11 +370,23 @@ class UsPcieSink(UsPcieBase):
         cocotb.start_soon(self._run_sink())
         cocotb.start_soon(self._run())
 
+        if hasattr(self.bus, "tvalid"):
+            cocotb.start_soon(self._run_tvalid_monitor())
+        if hasattr(self.bus, "tready"):
+            cocotb.start_soon(self._run_tready_monitor())
+
+    def _pause_update(self, val):
+        self.wake_event.set()
+
+    def _dequeue(self, frame):
+        self.wake_event.set()
+
     def _recv(self, frame):
         if self.queue.empty():
             self.active_event.clear()
         self.queue_occupancy_bytes -= len(frame)
         self.queue_occupancy_frames -= 1
+        self._dequeue(frame)
         return frame
 
     async def recv(self):
@@ -382,10 +416,28 @@ class UsPcieSink(UsPcieBase):
         else:
             await self.active_event.wait()
 
+    async def _run_tvalid_monitor(self):
+        event = RisingEdge(self.bus.tvalid)
+
+        while True:
+            await event
+            self.wake_event.set()
+
+    async def _run_tready_monitor(self):
+        event = RisingEdge(self.bus.tready)
+
+        while True:
+            await event
+            self.wake_event.set()
+
     async def _run_sink(self):
         clock_edge_event = RisingEdge(self.clock)
 
+        wake_event = self.wake_event.wait()
+
         while True:
+            pause_sample = bool(self.pause)
+
             await clock_edge_event
 
             # read handshake signals
@@ -401,7 +453,13 @@ class UsPcieSink(UsPcieBase):
                 self.bus.sample(self.sample_obj)
                 self.sample_sync.set()
 
-            self.bus.tready.value = (not self.full() and not self.pause)
+            paused = self.full() or pause_sample
+
+            self.bus.tready.value = not paused
+
+            if (not tvalid_sample or paused) and (pause_sample == bool(self.pause)):
+                self.wake_event.clear()
+                await wake_event
 
     async def _run(self):
         raise NotImplementedError()
