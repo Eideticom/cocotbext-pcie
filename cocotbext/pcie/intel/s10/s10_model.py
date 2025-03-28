@@ -255,6 +255,13 @@ class S10PcieDevice(Device):
 
         self.rx_queue = Queue()
 
+        # UG lists 770 CPLH and 2500 CPLD
+        # Tests confirm ~770 CPLH and ~2432 CPLD
+        self.rx_buf_cplh_fc_limit = 770
+        self.rx_buf_cpld_fc_limit = 2432
+        self.rx_buf_cplh_fc_count = 0
+        self.rx_buf_cpld_fc_count = 0
+
         # configuration options
         self.pcie_generation = pcie_generation
         self.pcie_link_width = pcie_link_width
@@ -608,11 +615,11 @@ class S10PcieDevice(Device):
             # config type 0
 
             # capture address information
-            self.bus_num = tlp.dest_id.bus
+            self.bus_num = tlp.completer_id.bus
 
             # pass TLP to function
             for f in self.functions:
-                if f.pcie_id == tlp.dest_id:
+                if f.pcie_id == tlp.completer_id:
                     await f.upstream_recv(tlp)
                     return
 
@@ -635,7 +642,16 @@ class S10PcieDevice(Device):
 
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    # check and track buffer occupancy
+                    data_fc = tlp.get_data_credits()
+
+                    if self.rx_buf_cplh_fc_count+1 <= self.rx_buf_cplh_fc_limit and self.rx_buf_cpld_fc_count+data_fc <= self.rx_buf_cpld_fc_limit:
+                        self.rx_buf_cplh_fc_count += 1
+                        self.rx_buf_cpld_fc_count += data_fc
+                        await self.rx_queue.put((tlp, frame))
+                    else:
+                        self.log.warning("No space in RX completion buffer, dropping TLP: CPLH %d (limit %d), CPLD %d (limit %d)",
+                            self.rx_buf_cplh_fc_count, self.rx_buf_cplh_fc_limit, self.rx_buf_cpld_fc_count, self.rx_buf_cpld_fc_limit)
 
                     tlp.release_fc()
 
@@ -657,7 +673,7 @@ class S10PcieDevice(Device):
                     frame.bar_range = 6
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    await self.rx_queue.put((tlp, frame))
 
                     tlp.release_fc()
 
@@ -678,7 +694,7 @@ class S10PcieDevice(Device):
                     frame.bar_range = bar[0]
                     frame.func_num = tlp.requester_id.function
 
-                    await self.rx_queue.put(frame)
+                    await self.rx_queue.put((tlp, frame))
 
                     tlp.release_fc()
 
@@ -738,8 +754,11 @@ class S10PcieDevice(Device):
 
     async def _run_rx_logic(self):
         while True:
-            frame = await self.rx_queue.get()
+            tlp, frame = await self.rx_queue.get()
             await self.rx_source.send(frame)
+
+            self.rx_buf_cplh_fc_count = max(self.rx_buf_cplh_fc_count-1, 0)
+            self.rx_buf_cpld_fc_count = max(self.rx_buf_cpld_fc_count-tlp.get_data_credits(), 0)
 
     async def _run_tx_logic(self):
         while True:

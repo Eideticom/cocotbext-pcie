@@ -24,6 +24,8 @@ THE SOFTWARE.
 
 import struct
 
+from cocotb.triggers import Timer
+
 from .caps import PciCapId, PciExtCapId
 from .utils import PcieId, align
 
@@ -112,6 +114,34 @@ class PciBus:
                 return dev
         return None
 
+    def only_one_child(self):
+        if isinstance(self.bridge, PciHostBridge):
+            return False
+        if self.bridge.is_pcie() and self.bridge.is_downstream_port():
+            return True
+        return False
+
+    async def wait_crs(self, dev_id, timeout=1000, timeout_unit='ns'):
+        delay = 10
+        val = 0xffff0001
+        while val == 0xffff0001:
+            if delay > 10000:
+                self.rc.log.warning("pci %s: not ready after %d us; giving up", dev_id, delay)
+                return False
+
+            if delay > 1000:
+                self.rc.log.info("pci %s: not ready after %d us; waiting", dev_id, delay)
+
+            await Timer(delay, 'us')
+            delay *= 2
+
+            val = await self.rc.config_read_dword(dev_id, 0x000, 'little', timeout, timeout_unit)
+
+        if delay > 1000:
+            self.rc.log.info("pci %s: ready after %d us", dev_id, delay)
+
+        return True
+
     async def scan(self, available_buses=0, timeout=1000, timeout_unit='ns'):
         first_bus = self.bus_num
         last_bus = first_bus
@@ -121,37 +151,46 @@ class PciBus:
             if self.bus_num == 0 and d == 0:
                 continue
 
+            dev_id = PcieId(self.bus_num, d, 0)
+
             self.rc.log.info("Enumerating bus %d device %d", self.bus_num, d)
 
             # read vendor ID and device ID
-            val = await self.rc.config_read_dword(PcieId(self.bus_num, d, 0), 0x000, 'little', timeout, timeout_unit)
+            val = await self.rc.config_read_dword(dev_id, 0x000, 'little', timeout, timeout_unit)
 
-            if val is None or val == 0xffffffff:
+            if val in {0, 0xffffffff, 0xffff0000, 0x0000ffff}:
                 continue
 
+            if val == 0xffff0001:
+                if not await self.wait_crs(dev_id, timeout, timeout_unit):
+                    continue
+
             # valid vendor ID
-            self.rc.log.info("Found device at %02x:%02x.%x", self.bus_num, d, 0)
+            self.rc.log.info("Found device at %s", dev_id)
 
             for f in range(8):
-                cur_func = PcieId(self.bus_num, d, f)
+                dev_id = PcieId(self.bus_num, d, f)
 
                 # read vendor ID and device ID
-                val = await self.rc.config_read_dword(cur_func, 0x000, 'little', timeout, timeout_unit)
+                val = await self.rc.config_read_dword(dev_id, 0x000, 'little', timeout, timeout_unit)
 
                 if val is None or val == 0xffffffff:
                     continue
 
                 dev = PciDevice(self)
-                dev.pcie_id = PcieId(self.bus_num, d, 0)
+                dev.pcie_id = dev_id
                 dev.vendor_id = val & 0xffff
                 dev.device_id = (val >> 16) & 0xffff
                 self.devices.append(dev)
 
                 await dev.setup()
 
-                if dev.header_type & 0x80 == 0:
+                if not dev.multifunction:
                     # only one function
                     break
+
+            if self.only_one_child():
+                break
 
         # recurse into bridges
         for dev in self.devices:
@@ -166,6 +205,8 @@ class PciBus:
         last_bus = first_bus
 
         self.rc.log.info("Scanning bridge %s", dev.pcie_id)
+
+        await dev.enable_crs()
 
         next_bus = last_bus + 1
 
@@ -353,6 +394,9 @@ class PciDevice:
 
     def pcie_type(self):
         return (self.pcie_capabilities_reg >> 4) & 0xf
+
+    def is_downstream_port(self):
+        return self.pcie_type() in {0x4, 0x6, 0x8}
 
     def upstream_bridge(self):
         if self.bus.is_root():
@@ -552,6 +596,20 @@ class PciDevice:
 
     async def clear_master(self):
         await self.set_master(False)
+
+    async def enable_crs(self):
+        if not self.is_pcie():
+            return
+
+        root_cap = await self.capability_read_dword(PciCapId.EXP, 0x1E)
+
+        if root_cap & 0x00000001:
+            old_ctrl = await self.capability_read_word(PciCapId.EXP, 0x1C)
+
+            ctrl = old_ctrl | 0x0010
+
+            if ctrl != old_ctrl:
+                await self.capability_write_word(PciCapId.EXP, 0x1C, ctrl)
 
     async def configure_msi(self):
         await self.rc.configure_msi(self)

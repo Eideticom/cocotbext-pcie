@@ -32,18 +32,15 @@ MODULE   = $(DUT)
 VERILOG_SOURCES  = $(DUT).v
 
 # module parameters
-export PARAM_SEG_COUNT ?= 1
-export PARAM_SEG_DATA_WIDTH ?= 256
-export PARAM_SEG_PARITY_WIDTH ?= $(shell expr $(PARAM_SEG_DATA_WIDTH) / 8 )
-export PARAM_SEG_EMPTY_WIDTH ?= $(shell python -c "print((($(PARAM_SEG_DATA_WIDTH)//32)-1).bit_length())" )
+export PARAM_SEG_COUNT := 1
+export PARAM_SEG_DATA_WIDTH := 256
+export PARAM_SEG_PARITY_WIDTH := $(shell expr $(PARAM_SEG_DATA_WIDTH) / 8 )
+export PARAM_SEG_EMPTY_WIDTH := $(shell python -c "print((($(PARAM_SEG_DATA_WIDTH)//32)-1).bit_length())" )
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
 
-	COMPILE_ARGS += -P $(TOPLEVEL).SEG_COUNT=$(PARAM_SEG_COUNT)
-	COMPILE_ARGS += -P $(TOPLEVEL).SEG_DATA_WIDTH=$(PARAM_SEG_DATA_WIDTH)
-	COMPILE_ARGS += -P $(TOPLEVEL).SEG_PARITY_WIDTH=$(PARAM_SEG_PARITY_WIDTH)
-	COMPILE_ARGS += -P $(TOPLEVEL).SEG_EMPTY_WIDTH=$(PARAM_SEG_EMPTY_WIDTH)
+	COMPILE_ARGS += $(foreach v,$(filter PARAM_%,$(.VARIABLES)),-P $(TOPLEVEL).$(subst PARAM_,,$(v))=$($(v)))
 
 	ifeq ($(WAVES), 1)
 		VERILOG_SOURCES += iverilog_dump.v
@@ -52,10 +49,7 @@ ifeq ($(SIM), icarus)
 else ifeq ($(SIM), verilator)
 	COMPILE_ARGS += -Wno-SELRANGE -Wno-WIDTH
 
-	COMPILE_ARGS += -GSEG_COUNT=$(PARAM_SEG_COUNT)
-	COMPILE_ARGS += -GSEG_DATA_WIDTH=$(PARAM_SEG_DATA_WIDTH)
-	COMPILE_ARGS += -GSEG_PARITY_WIDTH=$(PARAM_SEG_PARITY_WIDTH)
-	COMPILE_ARGS += -GSEG_EMPTY_WIDTH=$(PARAM_SEG_EMPTY_WIDTH)
+	COMPILE_ARGS += $(foreach v,$(filter PARAM_%,$(.VARIABLES)),-G$(subst PARAM_,,$(v))=$($(v)))
 
 	ifeq ($(WAVES), 1)
 		COMPILE_ARGS += --trace-fst
