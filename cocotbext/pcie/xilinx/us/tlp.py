@@ -309,7 +309,7 @@ class Tlp_us(Tlp):
             # Completer Request descriptor
             if self.fmt_type in {TlpType.CFG_READ_0, TlpType.CFG_WRITE_0, TlpType.CFG_READ_1, TlpType.CFG_WRITE_1}:
                 # configuration
-                dw = self.address & 0xffc
+                dw = (self.register_number & 0x3ff) << 2
                 pkt.data.append(dw)
                 pkt.data.append(0)
             else:
@@ -377,7 +377,7 @@ class Tlp_us(Tlp):
                         tlp.fmt = TlpFmt.FOUR_DW_DATA
             else:
                 # configuration
-                tlp.address = pkt.data[0] & 0xffc
+                tlp.register_number = (pkt.data[0] >> 2) & 0x3ff
             tlp.completer_id = PcieId.from_int(pkt.data[3] >> 8)
             tlp.requester_id_enable = bool(pkt.data[3] & (1 << 24))
 
@@ -532,12 +532,14 @@ class Tlp_us(Tlp):
                 self.bcm == other.bcm and
                 self.byte_count == other.byte_count and
                 self.requester_id == other.requester_id and
+                self.dest_id == other.dest_id and
                 self.tag == other.tag and
                 self.first_be == other.first_be and
                 self.last_be == other.last_be and
                 self.lower_address == other.lower_address and
                 self.address == other.address and
-                self.ph == other.ph
+                self.ph == other.ph and
+                self.register_number == other.register_number
             )
         return False
 
@@ -558,10 +560,12 @@ class Tlp_us(Tlp):
             f"bcm={self.bcm}, "
             f"byte_count={self.byte_count}, "
             f"requester_id={self.requester_id!r}, "
+            f"dest_id={self.dest_id!r}, "
             f"tag={self.tag}, "
             f"first_be={self.first_be:#x}, "
             f"last_be={self.last_be:#x}, "
             f"lower_address={self.lower_address:#x}, "
             f"address={self.address:#x}, "
-            f"ph={self.ph})"
+            f"ph={self.ph}, "
+            f"register_number={self.register_number:#x})"
         )

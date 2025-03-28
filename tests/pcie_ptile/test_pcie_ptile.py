@@ -56,7 +56,6 @@ class TB:
 
         self.dev = PTilePcieDevice(
             # configuration options
-            port_num=0,
             pcie_generation=3,
             # pcie_link_width=2,
             # user_clk_frequency=250e6,

@@ -199,10 +199,7 @@ class S10PcieBase:
         self.clock = clock
         self.reset = reset
         self.ready_latency = ready_latency
-        if bus._name:
-            self.log = logging.getLogger(f"cocotb.{bus._entity._name}.{bus._name}")
-        else:
-            self.log = logging.getLogger(f"cocotb.{bus._entity._name}")
+        self.log = logging.getLogger(f"cocotb.{bus._entity._name}.{bus._name}")
 
         super().__init__(*args, **kwargs)
 
