@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 
-Copyright (c) 2022 Alex Forencich
+Copyright (c) 2022-2025 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -779,9 +779,14 @@ class TB:
         while True:
             await RisingEdge(self.dut.coreclkout_hip)
 
-            if self.dut.tl_cfg_func.value.integer == 0:
-                addr = self.dut.tl_cfg_add.value.integer
-                ctl = self.dut.tl_cfg_ctl.value.integer
+            try:
+                func = int(self.dut.tl_cfg_func.value)
+                addr = int(self.dut.tl_cfg_add.value)
+                ctl = int(self.dut.tl_cfg_ctl.value)
+            except ValueError:
+                continue
+
+            if func == 0:
                 if addr == 0x00:
                     self.dev_max_payload = ctl & 0x7
                     self.dev_max_read_req = (ctl >> 3) & 0x7
@@ -992,7 +997,7 @@ def cycle_pause():
     return itertools.cycle([1, 1, 1, 0])
 
 
-if cocotb.SIM_NAME:
+if getattr(cocotb, 'top', None) is not None:
 
     for test in [
                 run_test_mem,
